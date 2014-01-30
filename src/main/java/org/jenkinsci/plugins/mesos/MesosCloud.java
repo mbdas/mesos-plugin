@@ -15,6 +15,8 @@
 package org.jenkinsci.plugins.mesos;
 
 import hudson.Extension;
+import hudson.init.Initializer;
+import hudson.init.InitMilestone;
 import hudson.model.Computer;
 import hudson.model.Descriptor;
 import hudson.model.Descriptor.FormException;
@@ -73,6 +75,43 @@ public class MesosCloud extends Cloud {
 
   private static volatile boolean nativeLibraryLoaded = false;
 
+  /**
+   * We want to start the mesos scheduler as part of the initialization of jenkins
+   * and after the cloud class values has been restored from persistence.If this is
+   * the very first time, this method will be NOOP as MesosCloud is not registered yet
+   */
+
+  @Initializer(after=InitMilestone.JOB_LOADED)
+  public static void init() {
+    Hudson h = Hudson.getInstance();
+    List<Node> slaves = h.getNodes();
+
+    // Turning the below flag off because the below slave removals
+    // causes computer launch in other slaves that have not been
+    // removed yet.
+    h.AUTOMATIC_SLAVE_LAUNCH = false;
+    for (Node n : slaves) {
+      //Remove all slaves that were persisted when jenkins shutdown
+      if (n instanceof MesosSlave) {
+        ((MesosSlave)n).terminate();
+      }
+    }        
+
+    // Turn it back on for future real slaves
+    h.AUTOMATIC_SLAVE_LAUNCH = true;
+
+    for (Cloud c : h.clouds) {
+      if( c instanceof MesosCloud) {
+        ((MesosCloud)c).restartMesos();
+      }
+    }
+
+  } 
+
+
+
+
+
   @DataBoundConstructor
   public MesosCloud(String nativeLibraryPath, String master, String description, int slaveCpus,
       int slaveMem, int maxExecutors, int executorCpus, int executorMem, int idleTerminationMinutes)
@@ -93,13 +132,7 @@ public class MesosCloud extends Cloud {
 
   }
 
-  /**
-   * Synchronizing the method to handle a case where after a jenkins restart, user may go to the
-   * management page to change some of the plugin values.There may be pending builds in the
-   * queue that starts to get provisioned at the same time and so there would be a race between
-   * provision and the DataBoundCtr.
-   */ 
-  private synchronized void restartMesos() {
+  public void restartMesos() {
 
     if(!nativeLibraryLoaded) {
       // First, we attempt to load the library from the given path.
@@ -134,10 +167,7 @@ public class MesosCloud extends Cloud {
   @Override
   public Collection<PlannedNode> provision(Label label, int excessWorkload) {
     List<PlannedNode> list = new ArrayList<PlannedNode>();
-    // After a jenkins restart, for any scheduling of pending builds or new builds
-    // the below call will start the scheduler if it was not running.
-    //TODO Find a better home for this call to invoke it just once on jenkins startup.
-    restartMesos();
+
     try {
       while (excessWorkload > 0) {
         final int numExecutors = Math.min(excessWorkload, maxExecutors);
@@ -176,8 +206,6 @@ public class MesosCloud extends Cloud {
     // Provisioning is simply creating a task for a jenkins slave.
     // Therefore, we can always provision as long as the label
     // matches "mesos".
-    // TODO(vinod): The framework may not have the resources necessary
-    // to start a task when it comes time to launch the slave.
     return label.matches(Label.parse(labelString));
   }
 
